@@ -790,7 +790,9 @@ async fn provision_domain(
                     .with("success", true)
                     .with(
                         "verification_method",
-                        certificate.verification_method.clone(),
+                        crate::domain_service::verification_method_label(
+                            &certificate.verification_method,
+                        ),
                     )
                     .with("is_wildcard", certificate.is_wildcard),
                 );
@@ -855,7 +857,9 @@ async fn provision_domain(
                 .with("success", true)
                 .with(
                     "verification_method",
-                    certificate.verification_method.clone(),
+                    crate::domain_service::verification_method_label(
+                        &certificate.verification_method,
+                    ),
                 )
                 .with("is_wildcard", certificate.is_wildcard),
             );
@@ -888,6 +892,17 @@ async fn provision_domain(
         }
         Err(e) => {
             error!("Failed to provision certificate for {}: {}", domain, e);
+            // DNS-01 failures are reported by DomainService; this HTTP-01 path
+            // goes through TlsService directly, so report it here.
+            app_state.telemetry.report(
+                temps_core::telemetry::TelemetryEvent::new(
+                    temps_core::telemetry::TelemetryEventKind::SslCertificateFailed,
+                )
+                .with("stage", "provision")
+                .with("verification_method", "http-01")
+                .with("is_wildcard", domain.starts_with("*."))
+                .with_failure_from_message(&e.to_string()),
+            );
             Ok((
                 StatusCode::OK,
                 Json(ProvisionResponse::Error(DomainError {
@@ -1293,7 +1308,10 @@ async fn finalize_order(
             temps_core::telemetry::TelemetryEventKind::SslCertificateIssued,
         )
         .with("success", true)
-        .with("verification_method", domain.verification_method.clone())
+        .with(
+            "verification_method",
+            crate::domain_service::verification_method_label(&domain.verification_method),
+        )
         .with("is_wildcard", domain.is_wildcard),
     );
 
@@ -1749,7 +1767,10 @@ async fn renew_domain(
                     temps_core::telemetry::TelemetryEventKind::SslCertificateIssued,
                 )
                 .with("success", true)
-                .with("verification_method", renewed.verification_method.clone())
+                .with(
+                    "verification_method",
+                    crate::domain_service::verification_method_label(&renewed.verification_method),
+                )
                 .with("is_wildcard", renewed.is_wildcard),
             );
             return Ok((
@@ -1776,7 +1797,10 @@ async fn renew_domain(
                     temps_core::telemetry::TelemetryEventKind::SslCertificateIssued,
                 )
                 .with("success", true)
-                .with("verification_method", renewed.verification_method.clone())
+                .with(
+                    "verification_method",
+                    crate::domain_service::verification_method_label(&renewed.verification_method),
+                )
                 .with("is_wildcard", renewed.is_wildcard),
             );
             Ok((

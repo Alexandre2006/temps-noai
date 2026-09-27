@@ -957,6 +957,66 @@ async fn register_node(
     // The router is served with `into_make_service_with_connect_info`, so the
     // peer address is always present in production; unit tests inject it via a
     // `MockConnectInfo` layer.
+    connect_info: ConnectInfo<std::net::SocketAddr>,
+    request: Json<RegisterNodeApiRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    // Every rejection below returns early, so the outcome is reported once
+    // here rather than at each exit.
+    let telemetry = app_state.telemetry.clone();
+    let result = register_node_inner(State(app_state), connect_info, request).await;
+    if let Err(problem) = &result {
+        let title = problem.body.get("title").and_then(|t| t.as_str());
+        if let Some(code) = node_join_failure_code(problem.status_code, title) {
+            telemetry.report(
+                temps_core::telemetry::TelemetryEvent::new(
+                    temps_core::telemetry::TelemetryEventKind::WorkerNodeJoinFailed,
+                )
+                .with_failure(code),
+            );
+        }
+    }
+    result
+}
+
+/// Titles of the rejections for a missing or unknown join token. Anyone who
+/// can reach the endpoint can produce these, so they are not join attempts.
+const TITLE_JOIN_TOKEN_REQUIRED: &str = "Join Token Required";
+const TITLE_UNKNOWN_ENROLLMENT_TOKEN: &str = "Invalid Enrollment Token";
+
+/// Fixed telemetry label for a rejected node registration, from the response
+/// status (and, for token rejections, the fixed title); response details can
+/// name nodes, so they are never read. `None` for rejections anyone can
+/// trigger against this unauthenticated endpoint -- rate-limited requests and
+/// missing or unknown tokens -- so scanners can neither drive outbound
+/// telemetry nor drown real join failures. A token that exists but is
+/// expired, revoked, exhausted or bound elsewhere is still reported.
+fn node_join_failure_code(
+    status: StatusCode,
+    title: Option<&str>,
+) -> Option<temps_core::telemetry::OperationFailureCode> {
+    use temps_core::telemetry::OperationFailureCode as Code;
+    if matches!(
+        title,
+        Some(TITLE_JOIN_TOKEN_REQUIRED | TITLE_UNKNOWN_ENROLLMENT_TOKEN)
+    ) {
+        return None;
+    }
+    match status {
+        StatusCode::TOO_MANY_REQUESTS => None,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Some(Code::Authentication),
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => {
+            Some(Code::InvalidConfiguration)
+        }
+        StatusCode::NOT_FOUND => Some(Code::NotFound),
+        StatusCode::CONFLICT => Some(Code::Conflict),
+        StatusCode::SERVICE_UNAVAILABLE => Some(Code::NoEligibleNode),
+        StatusCode::GATEWAY_TIMEOUT => Some(Code::Timeout),
+        _ => Some(Code::Unknown),
+    }
+}
+
+async fn register_node_inner(
+    State(app_state): State<Arc<NodeAppState>>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     Json(request): Json<RegisterNodeApiRequest>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -995,7 +1055,7 @@ async fn register_node(
             request.name
         );
         problemdetails::new(StatusCode::FORBIDDEN)
-            .with_title("Join Token Required")
+            .with_title(TITLE_JOIN_TOKEN_REQUIRED)
             .with_detail("A token is required to register a node. Generate an enrollment token in Settings > Worker Nodes.")
     })?;
 
@@ -1062,7 +1122,7 @@ async fn register_node(
                     request.name
                 );
                 return Err(problemdetails::new(StatusCode::FORBIDDEN)
-                    .with_title("Invalid Enrollment Token")
+                    .with_title(TITLE_UNKNOWN_ENROLLMENT_TOKEN)
                     .with_detail("The provided token is invalid or expired. Generate a new enrollment token in Settings > Worker Nodes."));
             }
             warn!(
@@ -3224,6 +3284,48 @@ impl From<NodeError> for Problem {
                     .with_detail("An internal error occurred")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod join_telemetry_tests {
+    use super::*;
+    use temps_core::telemetry::OperationFailureCode as Code;
+
+    #[test]
+    fn join_failures_map_status_to_fixed_codes() {
+        assert_eq!(
+            node_join_failure_code(StatusCode::FORBIDDEN, Some("Enrollment Token Not Usable")),
+            Some(Code::Authentication)
+        );
+        assert_eq!(
+            node_join_failure_code(StatusCode::BAD_REQUEST, None),
+            Some(Code::InvalidConfiguration)
+        );
+        assert_eq!(
+            node_join_failure_code(StatusCode::CONFLICT, None),
+            Some(Code::Conflict)
+        );
+        assert_eq!(
+            node_join_failure_code(StatusCode::INTERNAL_SERVER_ERROR, None),
+            Some(Code::Unknown)
+        );
+    }
+
+    #[test]
+    fn rejections_anyone_can_trigger_are_not_reported() {
+        assert_eq!(
+            node_join_failure_code(StatusCode::TOO_MANY_REQUESTS, None),
+            None
+        );
+        assert_eq!(
+            node_join_failure_code(StatusCode::FORBIDDEN, Some(TITLE_JOIN_TOKEN_REQUIRED)),
+            None
+        );
+        assert_eq!(
+            node_join_failure_code(StatusCode::FORBIDDEN, Some(TITLE_UNKNOWN_ENROLLMENT_TOKEN)),
+            None
+        );
     }
 }
 

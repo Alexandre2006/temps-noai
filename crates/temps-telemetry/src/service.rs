@@ -222,6 +222,46 @@ impl TelemetryService {
         Ok(id)
     }
 
+    /// Send one event and wait for the request to finish (bounded by the
+    /// client timeout). Only for paths where the process is about to exit, such
+    /// as a failed startup, where a fire-and-forget task would never run.
+    /// Never returns an error: telemetry must not change the caller's outcome.
+    pub async fn send_now(&self, event: TelemetryEvent) {
+        if !self.inner.enabled {
+            return;
+        }
+        let payload = EventPayload {
+            anonymous_id: &self.inner.anonymous_id,
+            event_type: &event.event_type,
+            properties: &event.properties,
+            temps_version: if self.inner.temps_version.is_empty() {
+                None
+            } else {
+                Some(&self.inner.temps_version)
+            },
+        };
+        match self
+            .inner
+            .client
+            .post(&self.inner.endpoint)
+            .json(&payload)
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => tracing::debug!(
+                event = %event.event_type,
+                status = %response.status(),
+                "telemetry endpoint rejected the event (ignored)"
+            ),
+            Err(e) => tracing::debug!(
+                event = %event.event_type,
+                error = %e,
+                "telemetry send failed (ignored)"
+            ),
+        }
+    }
+
     /// The stable anonymous id for this instance (exposed for diagnostics).
     pub fn anonymous_id(&self) -> &str {
         &self.inner.anonymous_id
@@ -446,16 +486,28 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_service_is_noop_and_reports_disabled() {
-        let _env = lock_telemetry_env();
         let dir = temp_dir();
-        // Force opt-out for this construction.
-        std::env::set_var("TEMPS_TELEMETRY", "0");
-        let svc = TelemetryService::new(&dir, "0.0.0-test").unwrap();
-        std::env::remove_var("TEMPS_TELEMETRY");
+        let svc = {
+            // Force opt-out for this construction only; the env lock must not
+            // be held across the await below.
+            let _env = lock_telemetry_env();
+            std::env::set_var("TEMPS_TELEMETRY", "0");
+            let svc = TelemetryService::new(&dir, "0.0.0-test").unwrap();
+            std::env::remove_var("TEMPS_TELEMETRY");
+            svc
+        };
 
         assert!(!svc.is_enabled());
         // Must not panic and must not spawn a request.
         svc.report(TelemetryEvent::new(TelemetryEventKind::ProjectCreated));
+        // The synchronous path honours the opt-out too: it returns without
+        // building a request, so it cannot wait on the network.
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            svc.send_now(TelemetryEvent::new(TelemetryEventKind::UpgradeFailed)),
+        )
+        .await
+        .expect("opted-out send_now must return immediately");
         std::fs::remove_dir_all(&dir).ok();
     }
 

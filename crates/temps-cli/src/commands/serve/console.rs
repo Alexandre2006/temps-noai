@@ -1713,6 +1713,10 @@ async fn validate_geolite2_database(
 /// Groups the dependencies needed by [`start_console_api`] to keep the
 /// function signature under clippy's argument limit.
 pub struct ConsoleApiParams {
+    /// Set when this start upgrades an existing installation (new version
+    /// since the last start, or migrations applied to an existing database);
+    /// reported as `upgrade_completed` alongside `instance_started`.
+    pub upgrade_probe: Option<super::upgrade_telemetry::UpgradeProbe>,
     pub db: Arc<DbConnection>,
     pub config: Arc<ServerConfig>,
     pub cookie_crypto: Arc<CookieCrypto>,
@@ -2824,6 +2828,7 @@ fn ai_read_safe_posts() -> Vec<String> {
 /// Initialize and start the console API server
 pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     let ConsoleApiParams {
+        upgrade_probe,
         db,
         config,
         cookie_crypto,
@@ -3556,6 +3561,9 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
 
     // Check if any users exist, if not prompt for admin email
     let service_context = plugin_manager.service_context();
+    // Kept for `complete_startup`, which runs only once the console listens.
+    let startup_reporter =
+        service_context.get_service::<dyn temps_core::telemetry::TelemetryReporter>();
 
     // Emit the anonymous `instance_started` telemetry event now that the
     // service registry is populated. Entirely best-effort: a missing reporter,
@@ -3646,13 +3654,16 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         let scheduler_token = cancellation_token.clone();
         let scheduler_service = tls_service.clone();
+        let scheduler_telemetry = service_context
+            .get_service::<dyn temps_core::telemetry::TelemetryReporter>()
+            .unwrap_or_else(|| Arc::new(temps_core::telemetry::NoopTelemetryReporter));
 
         tokio::spawn(async move {
             debug!("Starting certificate renewal scheduler");
             // Catch any panics to prevent scheduler issues from crashing the main task
             let result = std::panic::AssertUnwindSafe(async {
                 scheduler_service
-                    .start_certificate_renewal_scheduler(scheduler_token)
+                    .start_certificate_renewal_scheduler(scheduler_token, scheduler_telemetry)
                     .await
             })
             .catch_unwind()
@@ -4697,6 +4708,11 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
             // after plugin init -- see that call site for why the two are
             // deliberately decoupled.
             ready_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            super::upgrade_telemetry::complete_startup(
+                upgrade_probe.as_ref(),
+                startup_reporter.as_ref(),
+                &config.data_dir,
+            );
 
             let public_fut = axum::serve(
                 public_listener,
@@ -4727,6 +4743,11 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
             // plugin init -- see that call site for why the two are
             // deliberately decoupled.
             ready_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            super::upgrade_telemetry::complete_startup(
+                upgrade_probe.as_ref(),
+                startup_reporter.as_ref(),
+                &config.data_dir,
+            );
 
             axum::serve(
                 listener,

@@ -287,6 +287,9 @@ pub struct RestoreService {
     db: Arc<DatabaseConnection>,
     external_service_manager: Arc<ExternalServiceManager>,
     encryption_service: Arc<temps_core::EncryptionService>,
+    /// Anonymous product telemetry. No-op unless wired with
+    /// [`Self::with_telemetry`].
+    telemetry: Arc<dyn temps_core::telemetry::TelemetryReporter>,
 }
 
 impl RestoreService {
@@ -299,7 +302,18 @@ impl RestoreService {
             db,
             external_service_manager,
             encryption_service,
+            telemetry: Arc::new(temps_core::telemetry::NoopTelemetryReporter),
         }
+    }
+
+    /// Report restore outcomes as anonymous `restore_succeeded` /
+    /// `restore_failed` telemetry.
+    pub fn with_telemetry(
+        mut self,
+        telemetry: Arc<dyn temps_core::telemetry::TelemetryReporter>,
+    ) -> Self {
+        self.telemetry = telemetry;
+        self
     }
 
     /// Build an auto-suggested new-service name from a source name.
@@ -1038,8 +1052,9 @@ impl RestoreService {
         let db = self.db.clone();
         let mgr = self.external_service_manager.clone();
         let enc = self.encryption_service.clone();
+        let telemetry = self.telemetry.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_restore_worker(db, mgr, enc, run_id, mode).await {
+            if let Err(e) = run_restore_worker(db, mgr, enc, telemetry, run_id, mode).await {
                 error!("Restore run {} failed: {}", run_id, e);
             }
         });
@@ -1315,37 +1330,67 @@ async fn run_restore_worker(
     db: Arc<DatabaseConnection>,
     mgr: Arc<ExternalServiceManager>,
     enc: Arc<temps_core::EncryptionService>,
+    telemetry: Arc<dyn temps_core::telemetry::TelemetryReporter>,
     run_id: i32,
     mode: RestoreRequestMode,
 ) -> Result<(), RestoreError> {
+    let started = std::time::Instant::now();
+    let mode_label = mode.as_str();
     let result = run_restore_inner(db.clone(), mgr, enc, run_id, mode).await;
+    let elapsed = started.elapsed();
 
     let finished_at = Utc::now();
-    match &result {
-        Ok(target_service_id) => {
-            let mut active: temps_entities::restore_runs::ActiveModel =
-                load_run_for_update(&db, run_id).await?.into();
-            active.status = Set("completed".to_string());
-            active.phase = Set("completed".to_string());
-            active.target_service_id = Set(*target_service_id);
-            active.finished_at = Set(Some(finished_at));
-            active.error_message = Set(None);
-            active.update(db.as_ref()).await?;
-            info!("Restore run {} completed successfully", run_id);
+    let persisted: Result<(), RestoreError> = async {
+        let mut active: temps_entities::restore_runs::ActiveModel =
+            load_run_for_update(&db, run_id).await?.into();
+        active.finished_at = Set(Some(finished_at));
+        match &result {
+            Ok(target_service_id) => {
+                active.status = Set("completed".to_string());
+                active.phase = Set("completed".to_string());
+                active.target_service_id = Set(*target_service_id);
+                active.error_message = Set(None);
+                active.update(db.as_ref()).await?;
+                info!("Restore run {} completed successfully", run_id);
+            }
+            Err(e) => {
+                active.status = Set("failed".to_string());
+                active.phase = Set("failed".to_string());
+                active.error_message = Set(Some(e.to_string()));
+                active.update(db.as_ref()).await?;
+                error!("Restore run {} failed: {}", run_id, e);
+            }
         }
-        Err(e) => {
-            let mut active: temps_entities::restore_runs::ActiveModel =
-                load_run_for_update(&db, run_id).await?.into();
-            active.status = Set("failed".to_string());
-            active.phase = Set("failed".to_string());
-            active.finished_at = Set(Some(finished_at));
-            active.error_message = Set(Some(e.to_string()));
-            active.update(db.as_ref()).await?;
-            error!("Restore run {} failed: {}", run_id, e);
-        }
+        Ok(())
     }
+    .await;
 
+    // Reported only once the run's final state is persisted: a restore whose
+    // completion could not be recorded is not a success.
+    let outcome = match (&result, &persisted) {
+        (Err(e), _) | (Ok(_), Err(e)) => Err(e.to_string()),
+        (Ok(_), Ok(())) => Ok(()),
+    };
+    telemetry.report(restore_outcome_event(mode_label, elapsed, outcome));
+
+    persisted?;
     result.map(|_| ())
+}
+
+/// Anonymous restore outcome: the restore mode, a duration band and, on
+/// failure, a fixed code. The error message never leaves the instance.
+fn restore_outcome_event(
+    mode: &'static str,
+    elapsed: std::time::Duration,
+    outcome: Result<(), String>,
+) -> temps_core::telemetry::TelemetryEvent {
+    use temps_core::telemetry::{TelemetryEvent, TelemetryEventKind};
+    let event = match outcome {
+        Ok(()) => TelemetryEvent::new(TelemetryEventKind::RestoreSucceeded),
+        Err(message) => TelemetryEvent::new(TelemetryEventKind::RestoreFailed)
+            .with_failure_from_message(&message),
+    };
+    event.with("mode", mode).with_duration(elapsed)
 }
 
 async fn run_restore_inner(
@@ -2742,6 +2787,25 @@ async fn resolve_backup_location_from_s3(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_outcome_reports_mode_duration_and_code_only() {
+        let ok = restore_outcome_event("pitr", std::time::Duration::from_secs(400), Ok(()));
+        assert_eq!(ok.event_type, "restore_succeeded");
+        assert_eq!(ok.properties["mode"], "pitr");
+        assert_eq!(ok.properties["duration_bucket"], "5-30m");
+        assert!(!ok.properties.contains_key("failure_code"));
+
+        let failed = restore_outcome_event(
+            "new_service",
+            std::time::Duration::from_secs(3),
+            Err("download of s3://tenant-bucket/base.tar failed: No space left on device".into()),
+        );
+        assert_eq!(failed.event_type, "restore_failed");
+        assert_eq!(failed.properties["failure_code"], "disk_exhausted");
+        let serialized = serde_json::to_string(&failed).unwrap();
+        assert!(!serialized.contains("tenant-bucket"));
+    }
 
     #[test]
     fn redis_rdb_clone_plan_uses_current_volume_installer() {

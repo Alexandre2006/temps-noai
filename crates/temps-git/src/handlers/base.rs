@@ -27,6 +27,7 @@ use std::sync::Arc;
 use temps_auth::{
     permission_check, permission_guard, require_sensitive_action, Permission, RequireAuth,
 };
+use temps_core::telemetry::OperationFailureCode;
 use temps_core::SensitiveAction;
 use tracing::info;
 
@@ -699,7 +700,9 @@ pub async fn create_git_provider(
                 .with_detail(e)
         })?;
 
-    let provider = state
+    let provider_label = provider_type.to_string();
+    let (flow, connects_later) = git_auth_flow(&auth_method);
+    let result = state
         .git_provider_manager
         .create_provider(
             request.name,
@@ -710,14 +713,13 @@ pub async fn create_git_provider(
             request.webhook_secret,
             request.is_default,
         )
-        .await?;
-
-    state.telemetry.report(
-        temps_core::telemetry::TelemetryEvent::new(
-            temps_core::telemetry::TelemetryEventKind::GitProviderConnected,
-        )
-        .with("provider", provider.provider_type.clone()),
-    );
+        .await;
+    // OAuth and app providers are only connected once the callback or the
+    // app installation completes, which report the outcome themselves.
+    if !(connects_later && result.is_ok()) {
+        report_git_provider_result(&state, Some(&provider_label), flow, &result);
+    }
+    let provider = result?;
 
     Ok((
         StatusCode::CREATED,
@@ -1899,10 +1901,23 @@ pub async fn handle_git_provider_oauth_callback(
             format!("{}://{}/api", scheme, host)
         });
 
-    let connection = state
+    let result = state
         .git_provider_manager
         .handle_oauth_callback(provider_id, code, oauth_state, state_user_id, host)
-        .await?;
+        .await;
+    if state.telemetry.is_enabled() {
+        let provider_label = state
+            .git_provider_manager
+            .get_provider(provider_id)
+            .await
+            .ok()
+            // Re-validate the stored column through the typed enum so only a
+            // fixed label can be reported.
+            .and_then(|provider| GitProviderType::try_from(provider.provider_type.as_str()).ok())
+            .map(|provider_type| provider_type.to_string());
+        report_git_provider_result(&state, provider_label.as_deref(), "oauth", &result);
+    }
+    let connection = result?;
 
     // Redirect to success page or dashboard
     let redirect_url = format!(
@@ -1910,6 +1925,60 @@ pub async fn handle_git_provider_oauth_callback(
         provider_id, connection.id
     );
     Ok(axum::response::Redirect::to(&redirect_url))
+}
+
+/// Fixed telemetry label for a failed git provider connection. Typed variants
+/// map directly; anything else is classified from the message locally, and the
+/// message itself (which can carry hostnames or token fragments) is never sent.
+fn git_connect_failure_code(error: &GitProviderManagerError) -> OperationFailureCode {
+    match error {
+        GitProviderManagerError::ProviderError(GitProviderError::AuthenticationFailed(_))
+        | GitProviderManagerError::OAuthStateInvalid(_) => OperationFailureCode::Authentication,
+        GitProviderManagerError::ProviderError(GitProviderError::PermissionDenied { .. }) => {
+            OperationFailureCode::PermissionDenied
+        }
+        GitProviderManagerError::InvalidConfiguration(_)
+        | GitProviderManagerError::ProviderError(GitProviderError::InvalidConfiguration(_)) => {
+            OperationFailureCode::InvalidConfiguration
+        }
+        GitProviderManagerError::DatabaseError(_) => OperationFailureCode::Database,
+        other => OperationFailureCode::classify(&other.to_string()),
+    }
+}
+
+/// Telemetry `flow` label for a provider's credential, and whether the
+/// connection only completes later (OAuth callback or app installation), in
+/// which case creating the provider row is not yet a connection.
+fn git_auth_flow(auth_method: &AuthMethod) -> (&'static str, bool) {
+    match auth_method {
+        AuthMethod::GitHubApp { .. } => ("app", true),
+        AuthMethod::GitLabApp { .. } | AuthMethod::OAuth { .. } => ("oauth", true),
+        AuthMethod::PersonalAccessToken { .. } => ("pat", false),
+        AuthMethod::BasicAuth { .. } => ("basic", false),
+        AuthMethod::SSHKey { .. } => ("ssh", false),
+    }
+}
+
+/// Report the outcome of connecting a git provider: `git_provider_connected`
+/// on success, `git_provider_connect_failed` with a fixed code otherwise.
+/// `flow` is how the credential arrived (`pat`, `oauth`, `app`, ...).
+fn report_git_provider_result<T>(
+    state: &AppState,
+    provider: Option<&str>,
+    flow: &'static str,
+    result: &Result<T, GitProviderManagerError>,
+) {
+    use temps_core::telemetry::{TelemetryEvent, TelemetryEventKind};
+    let event = match result {
+        Ok(_) => TelemetryEvent::new(TelemetryEventKind::GitProviderConnected),
+        Err(error) => TelemetryEvent::new(TelemetryEventKind::GitProviderConnectFailed)
+            .with_failure(git_connect_failure_code(error)),
+    };
+    state.telemetry.report(
+        event
+            .with("flow", flow)
+            .with_opt("provider", provider.map(str::to_string)),
+    );
 }
 
 fn parse_auth_method(method_type: &str, config: serde_json::Value) -> Result<AuthMethod, String> {
@@ -2104,10 +2173,12 @@ pub async fn create_github_pat_provider(
 
     let user_id = auth.user_id();
 
-    let provider = state
+    let result = state
         .git_provider_manager
         .create_github_pat_provider(request.name.clone(), request.token, user_id)
-        .await?;
+        .await;
+    report_git_provider_result(&state, Some("github"), "pat", &result);
+    let provider = result?;
 
     Ok((
         StatusCode::CREATED,
@@ -2154,7 +2225,7 @@ pub async fn create_gitlab_pat_provider(
 
     let user_id = auth.user_id();
 
-    let provider = state
+    let result = state
         .git_provider_manager
         .create_gitlab_pat_provider(
             request.name.clone(),
@@ -2162,7 +2233,9 @@ pub async fn create_gitlab_pat_provider(
             user_id,
             request.base_url,
         )
-        .await?;
+        .await;
+    report_git_provider_result(&state, Some("gitlab"), "pat", &result);
+    let provider = result?;
 
     Ok((
         StatusCode::CREATED,
@@ -2272,7 +2345,7 @@ pub async fn create_gitea_pat_provider(
 
     let user_id = auth.user_id();
 
-    let provider = state
+    let result = state
         .git_provider_manager
         .create_gitea_pat_provider(
             request.name.clone(),
@@ -2280,7 +2353,9 @@ pub async fn create_gitea_pat_provider(
             user_id,
             request.base_url,
         )
-        .await?;
+        .await;
+    report_git_provider_result(&state, Some("gitea"), "pat", &result);
+    let provider = result?;
 
     info!(
         provider_id = provider.id,
@@ -2338,10 +2413,12 @@ pub async fn create_bitbucket_provider(
         }
     };
 
-    let provider = state
+    let result = state
         .git_provider_manager
         .create_bitbucket_provider(request.name.clone(), auth_method, user_id)
-        .await?;
+        .await;
+    report_git_provider_result(&state, Some("bitbucket"), "pat", &result);
+    let provider = result?;
 
     info!(
         provider_id = provider.id,
@@ -2415,7 +2492,7 @@ pub async fn create_generic_provider(
         _ => "x-access-token".to_string(),
     };
 
-    let provider = state
+    let result = state
         .git_provider_manager
         .create_generic_provider(
             request.name.clone(),
@@ -2425,7 +2502,9 @@ pub async fn create_generic_provider(
             request.base_url,
             user_id,
         )
-        .await?;
+        .await;
+    report_git_provider_result(&state, Some("generic"), "manual", &result);
+    let provider = result?;
 
     info!(
         provider_id = provider.id,

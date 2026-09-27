@@ -8,6 +8,9 @@ use sea_orm::{
     PaginatorTrait, QueryFilter, QueryOrder,
 };
 use std::sync::Arc;
+use temps_core::telemetry::{
+    NoopTelemetryReporter, TelemetryEvent, TelemetryEventKind, TelemetryReporter,
+};
 use temps_entities::domains;
 use temps_entities::on_demand_cert_attempts;
 use temps_entities::renewal_attempts;
@@ -115,11 +118,26 @@ pub enum DomainServiceError {
     CertificateAlreadyActive(String),
 }
 
+/// Fixed telemetry label for a certificate's verification method. The column is
+/// free text and holds legacy aliases (`acme`, `http`), so it is mapped rather
+/// than sent verbatim.
+pub(crate) fn verification_method_label(raw: &str) -> &'static str {
+    match raw {
+        "http-01" | "acme" | "http" => "http-01",
+        "dns-01" => "dns-01",
+        "manual" => "manual",
+        _ => "unknown",
+    }
+}
+
 pub struct DomainService {
     db: Arc<DatabaseConnection>,
     cert_provider: Arc<dyn CertificateProvider>,
     repository: Arc<dyn CertificateRepository>,
     encryption_service: Arc<temps_core::EncryptionService>,
+    /// Anonymous product telemetry. No-op unless wired with
+    /// [`Self::with_telemetry`].
+    telemetry: Arc<dyn TelemetryReporter>,
 }
 
 impl DomainService {
@@ -134,7 +152,15 @@ impl DomainService {
             cert_provider,
             repository,
             encryption_service,
+            telemetry: Arc::new(NoopTelemetryReporter),
         }
+    }
+
+    /// Report failed certificate attempts as anonymous `ssl_certificate_failed`
+    /// telemetry.
+    pub fn with_telemetry(mut self, telemetry: Arc<dyn TelemetryReporter>) -> Self {
+        self.telemetry = telemetry;
+        self
     }
 
     /// Whether a domain still holds a certificate that can safely keep being served:
@@ -255,6 +281,7 @@ impl DomainService {
     /// Append one row to the `renewal_attempts` audit log. Best-effort: a
     /// failure to write the audit row must never fail the caller's actual
     /// renewal outcome, so errors are logged and swallowed here.
+    #[allow(clippy::too_many_arguments)]
     async fn record_renewal_attempt(
         &self,
         domain_id: i32,
@@ -263,7 +290,19 @@ impl DomainService {
         outcome: &str,
         error: Option<String>,
         error_type: Option<String>,
+        report_telemetry: bool,
     ) {
+        if report_telemetry && outcome == "failed" {
+            self.telemetry.report(
+                TelemetryEvent::new(TelemetryEventKind::SslCertificateFailed)
+                    .with("stage", stage.to_string())
+                    .with(
+                        "verification_method",
+                        verification_method_label(verification_method),
+                    )
+                    .with_failure_from_message(error.as_deref().unwrap_or_default()),
+            );
+        }
         let row = renewal_attempts::ActiveModel {
             domain_id: Set(domain_id),
             stage: Set(stage.to_string()),
@@ -304,6 +343,28 @@ impl DomainService {
         &self,
         domain_name: &str,
         user_email: &str,
+    ) -> Result<ChallengeData, DomainServiceError> {
+        self.request_challenge_with(domain_name, user_email, true)
+            .await
+    }
+
+    /// [`Self::request_challenge`] without `ssl_certificate_failed` telemetry,
+    /// for the renewal scheduler, which reports every renewal outcome itself
+    /// (including failures before an ACME order exists).
+    pub(crate) async fn request_challenge_unreported(
+        &self,
+        domain_name: &str,
+        user_email: &str,
+    ) -> Result<ChallengeData, DomainServiceError> {
+        self.request_challenge_with(domain_name, user_email, false)
+            .await
+    }
+
+    async fn request_challenge_with(
+        &self,
+        domain_name: &str,
+        user_email: &str,
+        report_telemetry: bool,
     ) -> Result<ChallengeData, DomainServiceError> {
         info!(
             "Requesting Let's Encrypt challenge for domain: {} with email: {}",
@@ -386,6 +447,7 @@ impl DomainService {
                     "failed",
                     Some(e.to_string()),
                     Some("challenge_request".to_string()),
+                    report_telemetry,
                 )
                 .await;
 
@@ -482,6 +544,7 @@ impl DomainService {
                     "success",
                     None,
                     None,
+                    report_telemetry,
                 )
                 .await;
 
@@ -530,6 +593,7 @@ impl DomainService {
                     "success",
                     None,
                     None,
+                    report_telemetry,
                 )
                 .await;
 
@@ -552,6 +616,28 @@ impl DomainService {
         &self,
         domain_name: &str,
         user_email: &str,
+    ) -> Result<domains::Model, DomainServiceError> {
+        self.complete_challenge_with(domain_name, user_email, true)
+            .await
+    }
+
+    /// [`Self::complete_challenge`] without `ssl_certificate_failed`
+    /// telemetry, for the renewal scheduler (see
+    /// [`Self::request_challenge_unreported`]).
+    pub(crate) async fn complete_challenge_unreported(
+        &self,
+        domain_name: &str,
+        user_email: &str,
+    ) -> Result<domains::Model, DomainServiceError> {
+        self.complete_challenge_with(domain_name, user_email, false)
+            .await
+    }
+
+    async fn complete_challenge_with(
+        &self,
+        domain_name: &str,
+        user_email: &str,
+        report_telemetry: bool,
     ) -> Result<domains::Model, DomainServiceError> {
         debug!(
             "Completing challenge for domain: {} with email: {}",
@@ -706,6 +792,7 @@ impl DomainService {
                     "success",
                     None,
                     None,
+                    report_telemetry,
                 )
                 .await;
 
@@ -761,6 +848,7 @@ impl DomainService {
                     "failed",
                     Some(e.to_string()),
                     Some("challenge_completion".to_string()),
+                    report_telemetry,
                 )
                 .await;
 
