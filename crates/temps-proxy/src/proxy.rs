@@ -2216,14 +2216,11 @@ impl LoadBalancer {
         if let Some(visitor_id) = &ctx.visitor_id {
             let cookie_name = get_visitor_cookie_name(project_id);
 
-            let has_valid_visitor_cookie = session
-                .req_header()
-                .headers
-                .get_all("Cookie")
-                .iter()
-                .filter_map(|h| h.to_str().ok())
-                .flat_map(|s| Cookie::split_parse(s).filter_map(|c| c.ok()))
-                .any(|c| c.name() == cookie_name && self.crypto.decrypt(c.value()).is_ok());
+            let has_valid_visitor_cookie =
+                find_request_cookie(session.req_header(), &cookie_name, |value| {
+                    self.crypto.decrypt(value).ok().map(|_| ())
+                })
+                .is_some();
 
             if !has_valid_visitor_cookie {
                 let encrypted = match self.crypto.encrypt(visitor_id) {
@@ -3288,6 +3285,97 @@ fn strip_untrusted_client_ip_headers(request: &mut RequestHeader) {
     request.remove_header("forwarded");
     request.remove_header("x-real-ip");
     request.remove_header("cf-connecting-ip");
+}
+
+/// Collapse every `Cookie` field on the request into a single field before it
+/// is forwarded upstream.
+///
+/// HTTP/2 clients may split cookies into separate `cookie` fields for better
+/// header compression ("cookie crumbs", RFC 9113 §8.2.3), and browsers do so
+/// in practice. Pingora forwards the header map as-is, so an HTTP/1.1
+/// upstream would receive several `Cookie:` lines, which RFC 6265 §5.4
+/// forbids. Common app servers (PHP, and so WordPress/WooCommerce) then read
+/// only the first line and silently lose every other cookie. RFC 9113
+/// requires an intermediary to join the crumbs with `"; "` before forwarding
+/// to a non-HTTP/2 context; the joined form is equally valid over HTTP/2.
+///
+/// Values are joined as raw bytes so a crumb that is not valid UTF-8 is kept
+/// rather than dropped, and empty crumbs are skipped so the result never
+/// contains an empty `; ;` segment.
+///
+/// Never fails the request: every crumb is already a valid header value and
+/// `"; "` is too, so rebuilding the joined value cannot fail in practice. If it
+/// ever did, the crumbs are forwarded unchanged (the previous behaviour) and
+/// the failure is logged, rather than turning a cookie quirk into a 502.
+fn coalesce_cookie_headers(request: &mut RequestHeader) {
+    if request
+        .headers
+        .get_all(header::COOKIE)
+        .iter()
+        .nth(1)
+        .is_none()
+    {
+        return;
+    }
+
+    let crumbs = || {
+        request
+            .headers
+            .get_all(header::COOKIE)
+            .iter()
+            .map(|value| value.as_bytes().trim_ascii())
+            .filter(|crumb| !crumb.is_empty())
+    };
+    // One exactly-sized buffer that becomes the header value without a copy.
+    let mut joined = Vec::with_capacity(crumbs().map(|crumb| crumb.len() + 2).sum());
+    for crumb in crumbs() {
+        if !joined.is_empty() {
+            joined.extend_from_slice(b"; ");
+        }
+        joined.extend_from_slice(crumb);
+    }
+
+    if joined.is_empty() {
+        request.remove_header(&header::COOKIE);
+        return;
+    }
+    let result = header::HeaderValue::from_maybe_shared(Bytes::from(joined))
+        .map_err(|e| e.to_string())
+        .and_then(|value| {
+            request
+                .insert_header(header::COOKIE, value)
+                .map_err(|e| e.to_string())
+        });
+    if let Err(error) = result {
+        warn!(%error, "Could not combine Cookie header fields; forwarding them unchanged");
+    }
+}
+
+/// Look up a request cookie by name across every `Cookie` field, returning
+/// the first value for which `accept` yields `Some`.
+///
+/// Fields are decoded with `String::from_utf8_lossy`, not `to_str()`: one
+/// cookie carrying non-UTF-8 (obs-text) bytes must only garble itself, not
+/// hide every other cookie in the same field. That matters because
+/// `coalesce_cookie_headers` joins all HTTP/2 crumbs into a single field, and
+/// a single-field HTTP/1.1 request can carry such a cookie too. Valid UTF-8
+/// (the normal case) is borrowed without allocating.
+fn find_request_cookie<T>(
+    request: &RequestHeader,
+    name: &str,
+    mut accept: impl FnMut(&str) -> Option<T>,
+) -> Option<T> {
+    request
+        .headers
+        .get_all(header::COOKIE)
+        .iter()
+        .find_map(|field| {
+            let field = String::from_utf8_lossy(field.as_bytes());
+            Cookie::split_parse(field.as_ref())
+                .filter_map(Result::ok)
+                .filter(|cookie| cookie.name() == name)
+                .find_map(|cookie| accept(cookie.value()))
+        })
 }
 
 /// Whether a `Content-Type` value's media type — its "essence", the part
@@ -5346,22 +5434,19 @@ impl ProxyHttp for LoadBalancer {
                 }
 
                 // Check for valid password cookie
-                let has_valid_cookie = session
-                    .req_header()
-                    .headers
-                    .get_all("Cookie")
-                    .iter()
-                    .filter_map(|h| h.to_str().ok())
-                    .flat_map(|s| Cookie::split_parse(s).filter_map(Result::ok))
-                    .find(|c| c.name() == crate::handler::password_wall::PASSWORD_COOKIE_NAME)
-                    .map(|c| {
-                        crate::handler::password_wall::validate_cookie(
-                            c.value(),
+                // The first cookie with this name decides, as before.
+                let has_valid_cookie = find_request_cookie(
+                    session.req_header(),
+                    crate::handler::password_wall::PASSWORD_COOKIE_NAME,
+                    |value| {
+                        Some(crate::handler::password_wall::validate_cookie(
+                            value,
                             env_id,
                             &password_hash,
-                        )
-                    })
-                    .unwrap_or(false);
+                        ))
+                    },
+                )
+                .unwrap_or(false);
 
                 if !has_valid_cookie {
                     // No valid cookie — show password form
@@ -5643,6 +5728,11 @@ impl ProxyHttp for LoadBalancer {
         // possibly-spoofed client-supplied header instead.
         strip_untrusted_client_ip_headers(session.req_header_mut());
 
+        // Browsers split cookies across several fields over HTTP/2; the
+        // upstream must receive them as one `Cookie` header or it keeps only
+        // the first (see `coalesce_cookie_headers`).
+        coalesce_cookie_headers(session.req_header_mut());
+
         // Capture request headers
         let request_headers: HashMap<String, String> = session
             .req_header()
@@ -5667,25 +5757,15 @@ impl ProxyHttp for LoadBalancer {
         let visitor_cookie_name = get_visitor_cookie_name(project_id);
         let session_cookie_name = get_session_cookie_name(project_id);
 
-        ctx.request_visitor_cookie = session
-            .req_header()
-            .headers
-            .get_all("Cookie")
-            .iter()
-            .filter_map(|cookie_header| cookie_header.to_str().ok())
-            .flat_map(|cookie_str| Cookie::split_parse(cookie_str).filter_map(Result::ok))
-            .find(|cookie| cookie.name() == visitor_cookie_name)
-            .map(|cookie| cookie.value().to_string());
+        ctx.request_visitor_cookie =
+            find_request_cookie(session.req_header(), &visitor_cookie_name, |value| {
+                Some(value.to_string())
+            });
 
-        ctx.request_session_cookie = session
-            .req_header()
-            .headers
-            .get_all("Cookie")
-            .iter()
-            .filter_map(|cookie_header| cookie_header.to_str().ok())
-            .flat_map(|cookie_str| Cookie::split_parse(cookie_str).filter_map(Result::ok))
-            .find(|cookie| cookie.name() == session_cookie_name)
-            .map(|cookie| cookie.value().to_string());
+        ctx.request_session_cookie =
+            find_request_cookie(session.req_header(), &session_cookie_name, |value| {
+                Some(value.to_string())
+            });
 
         // Get IP from the connection
         // Add X-Forwarded-For header with client IP (already extracted in request_filter)
@@ -8614,7 +8694,10 @@ mod traffic_classification_tests {
 
 #[cfg(test)]
 mod forwarded_authority_tests {
-    use super::{parse_public_authority, strip_untrusted_client_ip_headers, PublicAuthority};
+    use super::{
+        coalesce_cookie_headers, find_request_cookie, parse_public_authority,
+        strip_untrusted_client_ip_headers, PublicAuthority,
+    };
     use axum::http::HeaderValue;
     use pingora_http::RequestHeader;
 
@@ -8717,6 +8800,144 @@ mod forwarded_authority_tests {
 
         assert!(!request.headers.contains_key("x-real-ip"));
         assert!(!request.headers.contains_key("cf-connecting-ip"));
+        assert_eq!(
+            request.headers.get("x-unrelated"),
+            Some(&HeaderValue::from_static("preserved"))
+        );
+    }
+
+    fn request_with_cookies(crumbs: &[&'static [u8]]) -> RequestHeader {
+        let mut request =
+            RequestHeader::build("GET", b"/", Some(2)).expect("test request header must be valid");
+        for crumb in crumbs {
+            request
+                .append_header(
+                    "cookie",
+                    HeaderValue::from_bytes(crumb).expect("cookie crumb must be a valid value"),
+                )
+                .expect("Cookie test header must be valid");
+        }
+        request
+    }
+
+    fn cookie_values(request: &RequestHeader) -> Vec<&[u8]> {
+        request
+            .headers
+            .get_all("cookie")
+            .iter()
+            .map(|value| value.as_bytes())
+            .collect()
+    }
+
+    /// Regression: an HTTP/2 browser sends each cookie as its own `cookie`
+    /// field (RFC 9113 §8.2.3). The upstream must get one joined header,
+    /// otherwise PHP-style servers keep only the first cookie
+    /// (`_temps_visitor_id`) and drop the app's session cookie.
+    #[test]
+    fn joins_http2_cookie_crumbs_into_one_header() {
+        let mut request = request_with_cookies(&[
+            b"_temps_visitor_id=abc",
+            b"woocommerce_items_in_cart=1",
+            b"zzz=3",
+        ]);
+
+        coalesce_cookie_headers(&mut request);
+
+        assert_eq!(
+            cookie_values(&request),
+            vec![&b"_temps_visitor_id=abc; woocommerce_items_in_cart=1; zzz=3"[..]]
+        );
+    }
+
+    #[test]
+    fn leaves_single_cookie_header_untouched() {
+        let mut request = request_with_cookies(&[b"a=1; b=2"]);
+
+        coalesce_cookie_headers(&mut request);
+
+        assert_eq!(cookie_values(&request), vec![&b"a=1; b=2"[..]]);
+    }
+
+    #[test]
+    fn no_cookie_header_stays_absent() {
+        let mut request = request_with_cookies(&[]);
+
+        coalesce_cookie_headers(&mut request);
+
+        assert!(!request.headers.contains_key("cookie"));
+    }
+
+    #[test]
+    fn joins_multi_cookie_crumbs_and_skips_empty_ones() {
+        let mut request = request_with_cookies(&[b"a=1; b=2", b"", b"  c=3  ", b"   "]);
+
+        coalesce_cookie_headers(&mut request);
+
+        assert_eq!(cookie_values(&request), vec![&b"a=1; b=2; c=3"[..]]);
+    }
+
+    #[test]
+    fn removes_cookie_header_when_every_crumb_is_empty() {
+        let mut request = request_with_cookies(&[b"", b" "]);
+
+        coalesce_cookie_headers(&mut request);
+
+        assert!(!request.headers.contains_key("cookie"));
+    }
+
+    /// Cookie values may carry obs-text bytes that are not valid UTF-8; they
+    /// must be forwarded byte-for-byte, never dropped.
+    #[test]
+    fn preserves_non_utf8_cookie_bytes() {
+        let mut request = request_with_cookies(&[b"a=v\xe9\xff", b"b=2"]);
+
+        coalesce_cookie_headers(&mut request);
+
+        assert_eq!(cookie_values(&request), vec![&b"a=v\xe9\xff; b=2"[..]]);
+    }
+
+    /// Regression (review of #1149): once crumbs are joined, a non-UTF-8
+    /// crumb shares a field with Temps' tracking cookies. They must stay
+    /// readable, otherwise returning visitors get fresh identities.
+    #[test]
+    fn tracking_cookies_stay_readable_next_to_a_non_utf8_crumb() {
+        let mut request = request_with_cookies(&[
+            b"_temps_visitor_id=visitor",
+            b"legacy=v\xe9\xff",
+            b"_temps_sid=session",
+        ]);
+
+        coalesce_cookie_headers(&mut request);
+
+        let value = |name: &str| find_request_cookie(&request, name, |v| Some(v.to_string()));
+        assert_eq!(value("_temps_visitor_id").as_deref(), Some("visitor"));
+        assert_eq!(value("_temps_sid").as_deref(), Some("session"));
+    }
+
+    #[test]
+    fn find_request_cookie_searches_every_field_and_filters_by_accept() {
+        let request = request_with_cookies(&[b"a=1; token=bad", b"token=good"]);
+
+        let accepted = find_request_cookie(&request, "token", |v| (v == "good").then_some(v.len()));
+        assert_eq!(accepted, Some(4));
+        assert_eq!(
+            find_request_cookie(&request, "token", |v| Some(v.to_string())).as_deref(),
+            Some("bad"),
+            "first cookie with the name comes first"
+        );
+        assert_eq!(find_request_cookie(&request, "missing", |_| Some(())), None);
+    }
+
+    #[test]
+    fn keeps_unrelated_headers_when_coalescing() {
+        let mut request = request_with_cookies(&[b"a=1", b"b=2"]);
+        request
+            .insert_header("x-unrelated", HeaderValue::from_static("preserved"))
+            .expect("unrelated test header must be valid");
+
+        coalesce_cookie_headers(&mut request);
+
+        assert_eq!(cookie_values(&request), vec![&b"a=1; b=2"[..]]);
         assert_eq!(
             request.headers.get("x-unrelated"),
             Some(&HeaderValue::from_static("preserved"))
