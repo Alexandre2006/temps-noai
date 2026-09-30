@@ -6,6 +6,7 @@ import { ArrowRight, Terminal } from 'lucide-react'
 import { Link, useLocation } from 'react-router'
 import { listApiKeysOptions } from '@/api/client/@tanstack/react-query.gen'
 import { getAiHarnessStatus } from '@/lib/ai-onboarding'
+import { useSettings } from '@/hooks/useSettings'
 
 /**
  * Keeps a half-finished external harness connection visible until the
@@ -14,16 +15,24 @@ import { getAiHarnessStatus } from '@/lib/ai-onboarding'
  */
 export function AiHarnessPendingBanner() {
   const { pathname } = useLocation()
+  const { data: settings } = useSettings()
+  const aiHarnessActive =
+    settings?.ai_features?.enabled !== false &&
+    settings?.ai_features?.harness_onboarding_enabled !== false
+
   const { data } = useQuery({
     ...listApiKeysOptions({ query: { page: 1, page_size: 100 } }),
+    enabled: aiHarnessActive,
     retry: false,
     refetchInterval: (query) =>
+      aiHarnessActive &&
       getAiHarnessStatus(query.state.data?.api_keys) === 'waiting'
         ? 10_000
         : false,
   })
 
   if (
+    !aiHarnessActive ||
     pathname === '/setup/ai' ||
     pathname.startsWith('/settings/keys') ||
     getAiHarnessStatus(data?.api_keys) !== 'waiting'

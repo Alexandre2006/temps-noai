@@ -25,15 +25,19 @@ export function useGettingStarted() {
   const manualHarness = useManualHarnessCompletion()
 
   const items: GettingStartedItem[] = [
-    {
-      key: 'ai',
-      label: 'Connect your AI harness',
-      description:
-        'Create a dedicated admin key, install the Temps skill, and verify access from your harness.',
-      done: signals.aiHarnessConfigured || manualHarness.completed,
-      href: '/setup/ai',
-      cta: 'Connect harness',
-    },
+    ...(signals.aiHarnessActive
+      ? [
+          {
+            key: 'ai',
+            label: 'Connect your AI harness',
+            description:
+              'Create a dedicated admin key, install the Temps skill, and verify access from your harness.',
+            done: signals.aiHarnessConfigured || manualHarness.completed,
+            href: '/setup/ai',
+            cta: 'Connect harness',
+          },
+        ]
+      : []),
     {
       key: 'git',
       label: 'Connect a Git provider',

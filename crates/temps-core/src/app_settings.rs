@@ -110,6 +110,10 @@ pub struct AppSettings {
     // AI configuration settings (global config repo for skills, MCP servers, etc.)
     pub ai_config: AiConfigSettings,
 
+    /// Global and granular feature flags for AI capabilities across the platform.
+    #[serde(default)]
+    pub ai_features: AiFeaturesSettings,
+
     /// Limits on a single AI chat turn. Operator-tunable because the right
     /// value depends on the model: a turn against a slow self-hosted model can
     /// legitimately take ten minutes, while a hosted one finishes in seconds
@@ -1117,6 +1121,70 @@ impl Default for AiConfigSettings {
     }
 }
 
+/// Global and granular feature toggles for AI capabilities across the platform.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(default)]
+pub struct AiFeaturesSettings {
+    /// Master toggle: when false, all AI capabilities across the platform are disabled.
+    #[schema(example = true)]
+    pub enabled: bool,
+    /// Whether AI harness connection and AI-first onboarding are offered.
+    #[schema(example = true)]
+    pub harness_onboarding_enabled: bool,
+    /// Whether the automatic deployment failure fixer (autofixer) is enabled.
+    #[schema(example = true)]
+    pub autofixer_enabled: bool,
+    /// Whether interactive AI chat and conversational assistant are enabled.
+    #[schema(example = true)]
+    pub chat_assistant_enabled: bool,
+    /// Whether agent sandboxes, autonomous agents, and MCP/skills are enabled.
+    #[schema(example = true)]
+    pub agent_sandboxes_enabled: bool,
+    /// Whether the AI gateway and provider proxying are enabled.
+    #[schema(example = true)]
+    pub ai_gateway_enabled: bool,
+}
+
+impl Default for AiFeaturesSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            harness_onboarding_enabled: true,
+            autofixer_enabled: true,
+            chat_assistant_enabled: true,
+            agent_sandboxes_enabled: true,
+            ai_gateway_enabled: true,
+        }
+    }
+}
+
+impl AiFeaturesSettings {
+    /// Whether AI harness connection and AI-first onboarding are active.
+    pub fn is_harness_onboarding_active(&self) -> bool {
+        self.enabled && self.harness_onboarding_enabled
+    }
+
+    /// Whether the automatic failure fixer is active.
+    pub fn is_autofixer_active(&self) -> bool {
+        self.enabled && self.autofixer_enabled
+    }
+
+    /// Whether AI chat / conversational assistant is active.
+    pub fn is_chat_assistant_active(&self) -> bool {
+        self.enabled && self.chat_assistant_enabled
+    }
+
+    /// Whether agent sandboxes and autonomous agent runs are active.
+    pub fn is_agent_sandboxes_active(&self) -> bool {
+        self.enabled && self.agent_sandboxes_enabled
+    }
+
+    /// Whether the AI gateway and provider proxying are active.
+    pub fn is_ai_gateway_active(&self) -> bool {
+        self.enabled && self.ai_gateway_enabled
+    }
+}
+
 fn default_auth_type() -> String {
     "subscription".to_string()
 }
@@ -1963,6 +2031,7 @@ impl Default for AppSettings {
             preview_gateway: PreviewGatewaySettings::default(),
             on_demand_tls: OnDemandTlsSettings::default(),
             ai_config: AiConfigSettings::default(),
+            ai_features: AiFeaturesSettings::default(),
             insecure_tls: false,
             ai_chat_limits: AiChatLimitsSettings::default(),
             ai_workspace_file_limits: AiWorkspaceFileLimitsSettings::default(),
@@ -3271,5 +3340,66 @@ mod tests {
         });
         let parsed = AppSettings::from_json(legacy);
         assert!(!parsed.multi_node.require_mtls);
+    }
+
+    #[test]
+    fn ai_features_settings_defaults_and_helpers() {
+        let default_ai = AiFeaturesSettings::default();
+        assert!(default_ai.enabled);
+        assert!(default_ai.harness_onboarding_enabled);
+        assert!(default_ai.autofixer_enabled);
+        assert!(default_ai.chat_assistant_enabled);
+        assert!(default_ai.agent_sandboxes_enabled);
+        assert!(default_ai.ai_gateway_enabled);
+
+        assert!(default_ai.is_harness_onboarding_active());
+        assert!(default_ai.is_autofixer_active());
+        assert!(default_ai.is_chat_assistant_active());
+        assert!(default_ai.is_agent_sandboxes_active());
+        assert!(default_ai.is_ai_gateway_active());
+
+        // Test master kill-switch
+        let mut disabled_ai = default_ai.clone();
+        disabled_ai.enabled = false;
+        assert!(!disabled_ai.is_harness_onboarding_active());
+        assert!(!disabled_ai.is_autofixer_active());
+        assert!(!disabled_ai.is_chat_assistant_active());
+        assert!(!disabled_ai.is_agent_sandboxes_active());
+        assert!(!disabled_ai.is_ai_gateway_active());
+
+        // Test granular toggles with master enabled
+        let mut granular = default_ai.clone();
+        granular.autofixer_enabled = false;
+        granular.harness_onboarding_enabled = false;
+        assert!(!granular.is_autofixer_active());
+        assert!(!granular.is_harness_onboarding_active());
+        assert!(granular.is_chat_assistant_active());
+        assert!(granular.is_agent_sandboxes_active());
+        assert!(granular.is_ai_gateway_active());
+    }
+
+    #[test]
+    fn ai_features_settings_round_trips_through_json() {
+        let mut settings = AppSettings::default();
+        settings.ai_features.enabled = false;
+        settings.ai_features.autofixer_enabled = false;
+
+        let json = settings.to_json();
+        let parsed = AppSettings::from_json(json);
+
+        assert_eq!(parsed.ai_features.enabled, false);
+        assert_eq!(parsed.ai_features.autofixer_enabled, false);
+        assert_eq!(parsed.ai_features.chat_assistant_enabled, true);
+    }
+
+    #[test]
+    fn legacy_settings_json_without_ai_features_deserializes() {
+        let legacy = serde_json::json!({
+            "external_url": "https://paas.example.com",
+            "preview_domain": "localho.st"
+        });
+        let parsed = AppSettings::from_json(legacy);
+        assert_eq!(parsed.ai_features, AiFeaturesSettings::default());
+        assert!(parsed.ai_features.enabled);
     }
 }

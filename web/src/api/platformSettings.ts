@@ -102,6 +102,15 @@ export interface AiConfigSettings {
   config_repo_branch: string
 }
 
+export interface AiFeaturesSettings {
+  enabled: boolean
+  harness_onboarding_enabled: boolean
+  autofixer_enabled: boolean
+  chat_assistant_enabled: boolean
+  agent_sandboxes_enabled: boolean
+  ai_gateway_enabled: boolean
+}
+
 export type MetricsStoreKind = 'timescale_db' | 'click_house'
 
 export interface MonitoringSettings {
@@ -212,6 +221,7 @@ export interface PlatformSettings extends AppSettingsResponse {
   trust_loopback_forwarded_ip: boolean
   disk_space_alert: DiskSpaceAlertSettings
   ai_config: AiConfigSettings
+  ai_features: AiFeaturesSettings
   insecure_tls: boolean
   build_limits: BuildLimitsSettings
   /** Enabled, running services included in the metrics scrape cycle. */
@@ -323,6 +333,7 @@ export function buildPlatformSettingsUpdateBody(
     agent_sandbox:
       updated.agent_sandbox as unknown as AppSettings['agent_sandbox'],
     ai_config: updated.ai_config,
+    ai_features: updated.ai_features,
     build_limits: updated.build_limits,
     ai_chat_limits: updated.ai_chat_limits,
     ai_workspace_file_limits: updated.ai_workspace_file_limits,

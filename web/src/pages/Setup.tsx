@@ -64,7 +64,7 @@ function buildRecommendations(
 ): Recommendation[] {
   const recs: Recommendation[] = []
 
-  if (!s.aiProviderConfigured) {
+  if (s.aiHarnessActive && !s.aiProviderConfigured) {
     recs.push({
       key: 'ai-provider',
       icon: Sparkles,

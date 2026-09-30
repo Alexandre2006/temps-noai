@@ -44,6 +44,7 @@ type SettingsFormData = Pick<
   | 'screenshots'
   | 'letsencrypt'
   | 'console_force_https'
+  | 'ai_features'
 >
 
 function optionalString(value: string | null | undefined): string | null {
@@ -80,11 +81,20 @@ export function Settings() {
         email: '',
         environment: 'production',
       },
+      ai_features: {
+        enabled: true,
+        harness_onboarding_enabled: true,
+        autofixer_enabled: true,
+        chat_assistant_enabled: true,
+        agent_sandboxes_enabled: true,
+        ai_gateway_enabled: true,
+      },
     },
   })
 
   const screenshots = useWatch({ control, name: 'screenshots' })
   const consoleForceHttps = useWatch({ control, name: 'console_force_https' })
+  const aiFeatures = useWatch({ control, name: 'ai_features' })
   // Tri-state, so a Switch can't represent it: null ("inherit the certificate
   // heuristic") is a genuinely different answer from false ("never redirect").
   const consoleForceHttpsValue =
@@ -120,6 +130,14 @@ export function Settings() {
         letsencrypt: {
           email: settings.letsencrypt?.email || '',
           environment: settings.letsencrypt?.environment || 'production',
+        },
+        ai_features: settings.ai_features || {
+          enabled: true,
+          harness_onboarding_enabled: true,
+          autofixer_enabled: true,
+          chat_assistant_enabled: true,
+          agent_sandboxes_enabled: true,
+          ai_gateway_enabled: true,
         },
       })
     }
@@ -499,6 +517,141 @@ export function Settings() {
                   )}
                 </>
               )}
+            </div>
+          </div>
+        </section>
+
+        <section
+          aria-labelledby="ai-features-settings-heading"
+          className="grid min-w-0 gap-5 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] md:gap-10"
+        >
+          <div className="space-y-1">
+            <h2
+              id="ai-features-settings-heading"
+              className="text-base font-semibold"
+            >
+              AI & Copilot
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              Configure system-wide AI capabilities, autonomous agents, and onboarding requirements.
+            </p>
+          </div>
+          <div className="min-w-0 space-y-6">
+            <div className="flex items-center justify-between rounded-lg border p-4">
+              <div className="space-y-0.5">
+                <Label htmlFor="ai-features-enabled" className="text-base font-medium">
+                  Enable all AI features
+                </Label>
+                <p className="text-sm text-muted-foreground">
+                  Master toggle. When disabled, all AI agents, chat assistants, autofixers, and AI gateway endpoints are globally turned off.
+                </p>
+              </div>
+              <Switch
+                id="ai-features-enabled"
+                checked={aiFeatures?.enabled}
+                onCheckedChange={(checked) =>
+                  setValue('ai_features.enabled', checked, {
+                    shouldDirty: true,
+                  })
+                }
+              />
+            </div>
+
+            <div className={`space-y-4 pl-2 ${!aiFeatures?.enabled ? 'opacity-50 pointer-events-none' : ''}`}>
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label htmlFor="ai-harness-onboarding">AI Harness Onboarding</Label>
+                  <p className="text-sm text-muted-foreground">
+                    Prompt and offer AI harness setup during initial onboarding and checklists.
+                  </p>
+                </div>
+                <Switch
+                  id="ai-harness-onboarding"
+                  disabled={!aiFeatures?.enabled}
+                  checked={aiFeatures?.harness_onboarding_enabled}
+                  onCheckedChange={(checked) =>
+                    setValue('ai_features.harness_onboarding_enabled', checked, {
+                      shouldDirty: true,
+                    })
+                  }
+                />
+              </div>
+
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label htmlFor="ai-autofixer">Deployment Failure Autofixer</Label>
+                  <p className="text-sm text-muted-foreground">
+                    Automatically diagnose and propose patches for failed builds and deployment errors.
+                  </p>
+                </div>
+                <Switch
+                  id="ai-autofixer"
+                  disabled={!aiFeatures?.enabled}
+                  checked={aiFeatures?.autofixer_enabled}
+                  onCheckedChange={(checked) =>
+                    setValue('ai_features.autofixer_enabled', checked, {
+                      shouldDirty: true,
+                    })
+                  }
+                />
+              </div>
+
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label htmlFor="ai-chat-assistant">Interactive AI Chat & Assistant</Label>
+                  <p className="text-sm text-muted-foreground">
+                    In-console conversational assistant and natural language querying.
+                  </p>
+                </div>
+                <Switch
+                  id="ai-chat-assistant"
+                  disabled={!aiFeatures?.enabled}
+                  checked={aiFeatures?.chat_assistant_enabled}
+                  onCheckedChange={(checked) =>
+                    setValue('ai_features.chat_assistant_enabled', checked, {
+                      shouldDirty: true,
+                    })
+                  }
+                />
+              </div>
+
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label htmlFor="ai-agent-sandboxes">Agent Sandboxes & CLI Harnesses</Label>
+                  <p className="text-sm text-muted-foreground">
+                    Isolated container environments for running autonomous agents (Claude CLI, Codex, OpenCode).
+                  </p>
+                </div>
+                <Switch
+                  id="ai-agent-sandboxes"
+                  disabled={!aiFeatures?.enabled}
+                  checked={aiFeatures?.agent_sandboxes_enabled}
+                  onCheckedChange={(checked) =>
+                    setValue('ai_features.agent_sandboxes_enabled', checked, {
+                      shouldDirty: true,
+                    })
+                  }
+                />
+              </div>
+
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label htmlFor="ai-gateway">AI Gateway & Provider Routing</Label>
+                  <p className="text-sm text-muted-foreground">
+                    Reverse proxy, BYOK management, and token tracking for upstream LLM providers.
+                  </p>
+                </div>
+                <Switch
+                  id="ai-gateway"
+                  disabled={!aiFeatures?.enabled}
+                  checked={aiFeatures?.ai_gateway_enabled}
+                  onCheckedChange={(checked) =>
+                    setValue('ai_features.ai_gateway_enabled', checked, {
+                      shouldDirty: true,
+                    })
+                  }
+                />
+              </div>
             </div>
           </div>
         </section>

@@ -163,7 +163,8 @@ pub use utils::*;
 // Re-export external dependencies
 pub use anyhow;
 pub use app_settings::{
-    AgentSandboxSettings, AiChatLimitsSettings, AiConfigSettings, AiWorkspaceFileLimitsSettings,
+    AgentSandboxSettings, AiChatLimitsSettings, AiConfigSettings, AiFeaturesSettings,
+    AiWorkspaceFileLimitsSettings,
     AppSettings, BuildLimitsSettings, CeilingEnforcement, CloudSettings, ClusterDnsSettings,
     ConnectionLimitSettings, ContainerLogSettings, DiskSpaceAlertSettings, DnsProviderSettings,
     DockerRegistrySettings, GeoLicenseKeyIntent, GeoSettings, GeoSettingsError,

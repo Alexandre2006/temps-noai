@@ -354,6 +354,9 @@ pub struct AppSettingsResponse {
     // AI config (config repo for skills/MCP/etc)
     pub ai_config: AiConfigSettings,
 
+    // Global and granular feature flags for AI capabilities
+    pub ai_features: temps_core::AiFeaturesSettings,
+
     // Workspace preview gateway (shared_secret masked)
     pub preview_gateway: PreviewGatewaySettingsMasked,
 
@@ -709,6 +712,7 @@ impl From<AppSettings> for AppSettingsResponse {
                     .unwrap_or_else(|| "docker".to_string()),
             },
             ai_config: settings.ai_config,
+            ai_features: settings.ai_features,
             preview_gateway: PreviewGatewaySettingsMasked {
                 image: settings.preview_gateway.image,
                 host_port: settings.preview_gateway.host_port,
@@ -900,6 +904,7 @@ impl AppSettingsResponse {
         UpdateCapabilityResponse,
         StartUpdateRequest,
         StartUpdateResponse,
+        temps_core::AiFeaturesSettings,
         temps_core::SelfUpdateSettings,
         temps_core::SelfUpdateAttempt,
         temps_core::SelfUpdateBlocker,

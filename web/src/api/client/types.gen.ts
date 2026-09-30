@@ -886,6 +886,36 @@ export type AiConfigSettings = {
     config_repo_branch?: string;
 };
 
+/**
+ * Global and granular feature toggles for AI capabilities across the platform.
+ */
+export type AiFeaturesSettings = {
+    /**
+     * Master toggle: when false, all AI capabilities across the platform are disabled.
+     */
+    enabled: boolean;
+    /**
+     * Whether AI harness connection and AI-first onboarding are offered.
+     */
+    harness_onboarding_enabled: boolean;
+    /**
+     * Whether the automatic deployment failure fixer (autofixer) is enabled.
+     */
+    autofixer_enabled: boolean;
+    /**
+     * Whether interactive AI chat and conversational assistant are enabled.
+     */
+    chat_assistant_enabled: boolean;
+    /**
+     * Whether agent sandboxes, autonomous agents, and MCP/skills are enabled.
+     */
+    agent_sandboxes_enabled: boolean;
+    /**
+     * Whether the AI gateway and provider proxying are enabled.
+     */
+    ai_gateway_enabled: boolean;
+};
+
 export type AiDataAccessResponse = {
     /**
      * Whether the AI assistant may read row data from this service
@@ -1588,6 +1618,7 @@ export type AppSettings = {
      */
     ai_chat_limits?: AiChatLimitsSettings;
     ai_config?: AiConfigSettings;
+    ai_features?: AiFeaturesSettings;
     /**
      * Transfer and preview limits for files in persistent AI workspaces.
      * These are runtime settings because operators have different control
@@ -1793,6 +1824,7 @@ export type AppSettingsResponse = {
      */
     ai_chat_limits: AiChatLimitsSettings;
     ai_config: AiConfigSettings;
+    ai_features: AiFeaturesSettings;
     /**
      * Persistent AI workspace file transfer and preview limits.
      */

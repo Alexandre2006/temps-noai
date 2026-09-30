@@ -41,6 +41,7 @@ import {
 } from '@/lib/ai-onboarding'
 import { useSensitiveActionVerification } from '@/hooks/useSensitiveActionVerification'
 import { sensitiveActionErrorMessage } from '@/lib/sensitiveActionProblem'
+import { useSettings } from '@/hooks/useSettings'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
 
@@ -70,6 +71,11 @@ export function AiOnboarding() {
   const [createdKeySecret, setCreatedKeySecret] = useState<string | null>(null)
   const origin = typeof window === 'undefined' ? '' : window.location.origin
   const commands = buildAiHarnessCommands(origin)
+
+  const { data: settings } = useSettings()
+  const aiDisabled =
+    settings?.ai_features?.enabled === false ||
+    settings?.ai_features?.harness_onboarding_enabled === false
 
   const {
     data: apiKeysData,
@@ -131,26 +137,69 @@ export function AiOnboarding() {
     createHarnessKey.mutate({ body: buildAiHarnessKeyRequest() })
   }
 
+  if (aiDisabled) {
+    return (
+      <div className="w-full space-y-6 p-4 sm:p-8">
+        <div className="flex items-center gap-3">
+          <Button asChild variant="ghost" size="icon" className="shrink-0">
+            <Link to="/setup" aria-label="Back to setup">
+              <ArrowLeft className="size-4" />
+            </Link>
+          </Button>
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+              AI Features Disabled
+            </h1>
+            <p className="mt-1 max-w-3xl text-sm text-muted-foreground sm:text-base">
+              AI capabilities and harness onboarding are currently disabled in platform settings.
+            </p>
+          </div>
+        </div>
+
+        <Card>
+          <CardContent className="space-y-4 p-6">
+            <p className="text-sm text-muted-foreground">
+              You can manage, deploy, and operate all projects and services without AI. If you wish to enable AI features, you can turn them on in Settings.
+            </p>
+            <div className="flex flex-wrap gap-3">
+              <Button asChild>
+                <Link to="/">Go to Dashboard</Link>
+              </Button>
+              <Button asChild variant="outline">
+                <Link to="/settings">Platform Settings</Link>
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
   return (
     <div className="w-full space-y-6 p-4 sm:p-8">
-      <div className="flex items-center gap-3">
-        <Button asChild variant="ghost" size="icon" className="shrink-0">
-          <Link to="/setup" aria-label="Back to setup">
-            <ArrowLeft className="size-4" />
-          </Link>
-        </Button>
-        <div>
-          <p className="text-xs font-medium uppercase tracking-[0.18em] text-primary">
-            AI harness quickstart
-          </p>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">
-            Let your AI operate Temps
-          </h1>
-          <p className="mt-1 max-w-3xl text-sm text-muted-foreground sm:text-base">
-            Give Codex, Claude Code, Cursor, or another compatible harness the
-            Temps skill and a dedicated credential for this instance.
-          </p>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <Button asChild variant="ghost" size="icon" className="shrink-0">
+            <Link to="/setup" aria-label="Back to setup">
+              <ArrowLeft className="size-4" />
+            </Link>
+          </Button>
+          <div>
+            <p className="text-xs font-medium uppercase tracking-[0.18em] text-primary">
+              AI harness quickstart
+            </p>
+            <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">
+              Let your AI operate Temps
+            </h1>
+            <p className="mt-1 max-w-3xl text-sm text-muted-foreground sm:text-base">
+              Give Codex, Claude Code, Cursor, or another compatible harness the
+              Temps skill and a dedicated credential for this instance.
+            </p>
+          </div>
         </div>
+        <Button asChild variant="outline" className="self-start sm:self-auto shrink-0">
+          <Link to="/">Skip & Go to Dashboard</Link>
+        </Button>
       </div>
 
       <Card className="overflow-hidden border-primary/20">

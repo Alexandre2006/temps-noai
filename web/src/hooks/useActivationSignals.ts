@@ -23,6 +23,8 @@ export interface ActivationSignals {
   aiHarnessConfigured: boolean
   /** Active provider can power Temps' built-in chat and AI features */
   aiProviderConfigured: boolean
+  /** Whether AI harness onboarding is currently active in settings */
+  aiHarnessActive: boolean
   /** Git provider connected and active */
   gitConnected: boolean
   /** At least one active wildcard domain in the database */
@@ -112,6 +114,7 @@ export function useActivationSignals(): ActivationSignals {
     return {
       aiHarnessConfigured: false,
       aiProviderConfigured: false,
+      aiHarnessActive: true,
       gitConnected: false,
       wildcardDomainReady: false,
       hasProject: false,
@@ -140,9 +143,17 @@ export function useActivationSignals(): ActivationSignals {
     !aiProviderStatusLoading &&
     !apiKeysLoading
 
-  const aiProviderConfigured = aiProviderStatus?.configured === true
+  const aiHarnessActive =
+    settings?.ai_features?.enabled !== false &&
+    settings?.ai_features?.harness_onboarding_enabled !== false
+  const aiProviderActive =
+    settings?.ai_features?.enabled !== false &&
+    settings?.ai_features?.ai_gateway_enabled !== false
+
+  const aiProviderConfigured =
+    aiProviderActive && aiProviderStatus?.configured === true
   const aiHarnessConfigured =
-    getAiHarnessStatus(apiKeysData?.api_keys) === 'connected'
+    aiHarnessActive && getAiHarnessStatus(apiKeysData?.api_keys) === 'connected'
 
   const gitConnected =
     (connections?.connections?.filter((c) => c.is_active).length ?? 0) > 0
@@ -169,7 +180,7 @@ export function useActivationSignals(): ActivationSignals {
   const teamInvited = (usersData?.length ?? 0) > 1
 
   const completed = [
-    aiHarnessConfigured,
+    aiHarnessActive ? aiHarnessConfigured : null,
     gitConnected,
     wildcardDomainReady,
     hasProject,
@@ -179,11 +190,14 @@ export function useActivationSignals(): ActivationSignals {
     backupsConfigured,
     dnsProviderConnected,
     teamInvited,
-  ].filter(Boolean).length
+  ].filter((v): v is boolean => v !== null && Boolean(v)).length
+
+  const totalCount = aiHarnessActive ? TOTAL : TOTAL - 1
 
   return {
     aiHarnessConfigured,
     aiProviderConfigured,
+    aiHarnessActive,
     gitConnected,
     wildcardDomainReady,
     hasProject,
@@ -195,6 +209,6 @@ export function useActivationSignals(): ActivationSignals {
     teamInvited,
     isLoaded,
     completedCount: completed,
-    totalCount: TOTAL,
+    totalCount,
   }
 }
